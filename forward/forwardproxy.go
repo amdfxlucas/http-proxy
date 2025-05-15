@@ -166,11 +166,21 @@ func (cp *CoreProxy) HandleTunnelRequest(w http.ResponseWriter, r *http.Request)
 	}
 
 	if r.Method == http.MethodConnect {
-		cp.logger.Debug("Tunneling.", zap.String("host", r.Host))
-		return cp.tunnelRequest(w, r, dialer)
+		var host_addr string = ""
+		if useScion {
+			host_addr = addr.String()
+		} else {
+			host_addr = hostPort
+		}
+		cp.logger.Debug("Tunneling.", zap.String("host", r.Host),
+			zap.Bool("use_scion", useScion),
+			zap.String("host_addr", host_addr))
+		return cp.tunnelRequest(w, r, dialer, host_addr)
 	}
 
-	cp.logger.Debug("Proxying.", zap.String("host", r.Host), zap.String("method", r.Method))
+	cp.logger.Debug("Proxying.", zap.String("host", r.Host),
+		zap.String("method", r.Method),
+		zap.Bool("use_scion", useScion))
 	return cp.forwardRequest(w, r, dialer)
 }
 
@@ -281,17 +291,15 @@ func parseBasicAuth(auth string) (username, password string, err error) {
 	return username, password, nil
 }
 
-func (cp *CoreProxy) tunnelRequest(w http.ResponseWriter, r *http.Request, dialer panpolicy.PANDialer) error {
+/*
+@param hostPort the resolved HostName of the server to dial
+*/
+func (cp *CoreProxy) tunnelRequest(w http.ResponseWriter, r *http.Request, dialer panpolicy.PANDialer, hostPort string) error {
 	if r.ProtoMajor == 2 || r.ProtoMajor == 3 {
 		if len(r.URL.Scheme) > 0 || len(r.URL.Path) > 0 {
 			return utils.NewHandlerError(http.StatusBadRequest,
 				fmt.Errorf("CONNECT request has :scheme and/or :path pseudo-header fields"))
 		}
-	}
-
-	hostPort := r.URL.Host
-	if hostPort == "" {
-		hostPort = r.Host
 	}
 
 	targetConn, err := dialer.DialContext(r.Context(), "tcp", hostPort)
