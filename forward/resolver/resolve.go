@@ -15,17 +15,23 @@
 package resolver
 
 import (
-	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
+	"github.com/miekg/dns"
 	"github.com/netsec-ethz/scion-apps/pkg/pan"
 	"github.com/scionproto-contrib/http-proxy/forward/utils"
 	"go.uber.org/zap"
+)
+
+var (
+	lokalResolverAddress = "127.0.0.1:5553" // preferably an instance of scion-sdns recursive resolver running locally
 )
 
 type ScionHostResolver struct {
@@ -90,7 +96,7 @@ func (s ScionHostResolver) HandleHostResolutionRequest(w http.ResponseWriter, r 
 		return utils.NewHandlerError(http.StatusBadRequest, errors.New("URL parameter 'host' must contain exaclty one value"))
 	}
 
-	addr, err := s.resolver.Resolve(r.Context(), hosts[0])
+	addr, verifyResult, err := s.resolver.ResolveAndVerify(r.Context(), hosts[0])
 	if err != nil {
 		return utils.NewHandlerError(http.StatusInternalServerError, err)
 	} else if addr.IsZero() {
@@ -99,17 +105,27 @@ func (s ScionHostResolver) HandleHostResolutionRequest(w http.ResponseWriter, r 
 		return nil
 	}
 
-	buf := &bytes.Buffer{}
-	buf.WriteString(addr.String())
-	w.Header().Set("Content-Type", "text/plain")
+	response := map[string]interface{}{
+		"address":        addr.String(),
+		"serverVerified": verifyResult.ServerVerified,
+		"recordVerified": verifyResult.RecordVerified,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(buf.Bytes())
+	_ = json.NewEncoder(w).Encode(response)
 
 	return nil
 }
 
+type VerifyResult struct {
+	ServerVerified bool
+	RecordVerified bool
+}
+
 type Resolver interface {
 	Resolve(ctx context.Context, host string) (pan.UDPAddr, error)
+	ResolveAndVerify(ctx context.Context, host string) (pan.UDPAddr, VerifyResult, error)
 }
 
 type panResolver struct {
@@ -141,6 +157,60 @@ func (r panResolver) Resolve(ctx context.Context, host string) (pan.UDPAddr, err
 	case addr := <-addrc:
 		return addr, nil
 	}
+}
+
+func (r panResolver) ResolveAndVerify(ctx context.Context, host string) (pan.UDPAddr, VerifyResult, error) {
+	answers, res, err := r.resolveAndVerifyRhine(host)
+	if err != nil {
+		return pan.UDPAddr{}, VerifyResult{}, err
+	}
+	if len(answers) == 0 {
+		return pan.UDPAddr{}, VerifyResult{}, fmt.Errorf("no answer")
+	}
+
+	fmt.Println("answers: ", answers)
+
+	for _, ans := range answers {
+		if strings.Contains(ans, "scion=") {
+			addr := strings.Split(ans, "scion=")[1]
+			fmt.Println("addr: ", addr)
+			panAddr, err := pan.ResolveUDPAddr(ctx, addr)
+			if err != nil {
+				return pan.UDPAddr{}, VerifyResult{}, err
+			}
+			fmt.Println("panAddr: ", panAddr)
+			return panAddr, VerifyResult{ServerVerified: res.ServerVerified, RecordVerified: res.RecordVerified}, nil
+		}
+	}
+	return pan.UDPAddr{}, VerifyResult{}, fmt.Errorf("no SCION Record found")
+}
+
+/*lookup address using local sdns resolver running under 'lokalResolverAddress'*/
+func (r panResolver) resolveAndVerifyRhine(domain string) ([]string, VerifyResult, error) {
+	var query *dns.Msg = new(dns.Msg)
+
+	query.SetQuestion(domain, dns.TypeTXT)
+	res := VerifyResult{}
+
+	//response, err := dns.Exchange(query, resolverAddress) yielded 'dns: overflowing header size' somethimes because UDP buffer was only 512
+	client := dns.Client{Net: "udp", UDPSize: 2048, ReadTimeout: 99999999999}
+	response, _, err := client.Exchange(query, lokalResolverAddress)
+
+	var answer []string
+	if err == nil {
+		if len(response.Answer) > 0 {
+			for _, ans := range response.Answer {
+
+				if a, ok := ans.(*dns.TXT); ok {
+					answer = append(answer, strings.Join(a.Txt, ""))
+				}
+				res.RecordVerified = response.AuthenticatedData
+			}
+		}
+
+	}
+	return answer, res, err
+
 }
 
 func (r panResolver) resolve(ctx context.Context, host string, addrc chan pan.UDPAddr, errc chan error) {

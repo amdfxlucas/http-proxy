@@ -40,6 +40,14 @@ func (r MockResolver) Resolve(ctx context.Context, name string) (pan.UDPAddr, er
 	return r.addr, nil
 }
 
+func (r MockResolver) ResolveAndVerify(ctx context.Context, name string) (pan.UDPAddr, VerifyResult, error) {
+	if r.addr == (pan.UDPAddr{}) {
+		// non-resolvable
+		return pan.UDPAddr{}, VerifyResult{}, nil
+	}
+	return r.addr, VerifyResult{}, nil
+}
+
 func TestHandleHostResolutionRequest(t *testing.T) {
 	cases := map[string]struct {
 		method       string
