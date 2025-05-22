@@ -31,7 +31,7 @@ import (
 )
 
 var (
-	lokalResolverAddress = "127.0.0.1:5553" // preferably an instance of scion-sdns recursive resolver running locally
+	lokalResolverAddress = "127.0.0.127:53" // TODO: Obtain this value later, for now test with it for the SEED scenario.
 )
 
 type ScionHostResolver struct {
@@ -160,6 +160,8 @@ func (r panResolver) Resolve(ctx context.Context, host string) (pan.UDPAddr, err
 }
 
 func (r panResolver) ResolveAndVerify(ctx context.Context, host string) (pan.UDPAddr, VerifyResult, error) {
+	log := r.logger.With(zap.String("host", host))
+	log.Info("Resolving Host via SDNS/RHINE")
 	answers, res, err := r.resolveAndVerifyRhine(host)
 	if err != nil {
 		return pan.UDPAddr{}, VerifyResult{}, err
@@ -168,17 +170,13 @@ func (r panResolver) ResolveAndVerify(ctx context.Context, host string) (pan.UDP
 		return pan.UDPAddr{}, VerifyResult{}, fmt.Errorf("no answer")
 	}
 
-	fmt.Println("answers: ", answers)
-
 	for _, ans := range answers {
 		if strings.Contains(ans, "scion=") {
 			addr := strings.Split(ans, "scion=")[1]
-			fmt.Println("addr: ", addr)
 			panAddr, err := pan.ResolveUDPAddr(ctx, addr)
 			if err != nil {
 				return pan.UDPAddr{}, VerifyResult{}, err
 			}
-			fmt.Println("panAddr: ", panAddr)
 			return panAddr, VerifyResult{ServerVerified: res.ServerVerified, RecordVerified: res.RecordVerified}, nil
 		}
 	}
@@ -189,6 +187,10 @@ func (r panResolver) ResolveAndVerify(ctx context.Context, host string) (pan.UDP
 func (r panResolver) resolveAndVerifyRhine(domain string) ([]string, VerifyResult, error) {
 	var query *dns.Msg = new(dns.Msg)
 
+	// Ensure the domain is fully qualified (ends with a dot)
+	if !strings.HasSuffix(domain, ".") {
+		domain = domain + "."
+	}
 	query.SetQuestion(domain, dns.TypeTXT)
 	res := VerifyResult{}
 
@@ -198,13 +200,13 @@ func (r panResolver) resolveAndVerifyRhine(domain string) ([]string, VerifyResul
 
 	var answer []string
 	if err == nil {
+		res.RecordVerified = response.AuthenticatedData
 		if len(response.Answer) > 0 {
 			for _, ans := range response.Answer {
 
 				if a, ok := ans.(*dns.TXT); ok {
 					answer = append(answer, strings.Join(a.Txt, ""))
 				}
-				res.RecordVerified = response.AuthenticatedData
 			}
 		}
 
