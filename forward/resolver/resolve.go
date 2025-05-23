@@ -192,6 +192,7 @@ func (r panResolver) resolveAndVerifyRhine(domain string) ([]string, VerifyResul
 		domain = domain + "."
 	}
 	query.SetQuestion(domain, dns.TypeTXT)
+	query.AuthenticatedData = true
 	res := VerifyResult{}
 
 	//response, err := dns.Exchange(query, resolverAddress) yielded 'dns: overflowing header size' somethimes because UDP buffer was only 512
